@@ -64,16 +64,26 @@ class GeminiHandler:
             logger.error(f"Detalles del error: {str(e)}")
             raise
 
-    def _split_transcript(self, transcript: str) -> List[str]:
+    def _split_transcript(self, transcript: str, detail_level: str = 'intermedio') -> List[str]:
         """
         Divide el transcript en chunks manejables.
         
         Args:
             transcript (str): Transcripción completa del video
+            detail_level (str): Nivel de detalle del análisis
             
         Returns:
             List[str]: Lista de chunks de texto
         """
+        # Ajustar el tamaño máximo del chunk según el nivel de detalle
+        chunk_sizes = {
+            'basico': 8000,     # Chunks más pequeños para análisis básico
+            'intermedio': 12000, # Tamaño estándar para análisis intermedio
+            'avanzado': 20000    # Chunks más grandes para análisis avanzado
+        }
+        
+        self.max_chunk_size = chunk_sizes.get(detail_level, 14000)
+        
         words = transcript.split()
         chunks = []
         current_chunk = []
@@ -100,10 +110,10 @@ class GeminiHandler:
                 combined_chunks.append(' '.join(chunks[i:i + chunk_size]))
             chunks = combined_chunks
         
-        logger.info(f"Transcript dividido en {len(chunks)} chunks")
+        logger.info(f"Transcript dividido en {len(chunks)} chunks de tamaño máximo {self.max_chunk_size}")
         return chunks
 
-    def generate_analysis(self, transcript: str) -> Dict[str, Any]:
+    def generate_analysis(self, transcript: str, detail_level: str = 'intermedio') -> Dict[str, Any]:
         """Genera un análisis del transcript usando Gemini."""
         mermaid_diagram_example = """
         graph TD
@@ -117,17 +127,34 @@ class GeminiHandler:
             G --> H[Fin]
         """
 
-        prompt = """Analiza el siguiente transcript de un video de YouTube y genera un análisis detallado en formato Markdown. 
-        El análisis debe incluir:
+        # Definir el nivel de detalle en el prompt según el parámetro
+        detail_instructions = {
+            'basico': """Genera un análisis conciso y directo que incluya:
+            1. Un resumen breve de los puntos principales
+            2. Los temas más importantes
+            3. Un diagrama Mermaid simple que muestre el flujo básico
+            4. Conclusiones principales
+            5. 2-3 temas relacionados""",
+            
+            'intermedio': """Genera un análisis detallado que incluya:
+            1. Un resumen ejecutivo de los puntos principales
+            2. Los temas clave discutidos con sus subtemas
+            3. Un diagrama Mermaid que muestre el flujo de los conceptos principales
+            4. Conclusiones y recomendaciones
+            5. 3-5 temas relacionados""",
+            
+            'avanzado': """Genera un análisis exhaustivo y profundo que incluya:
+            1. Un resumen ejecutivo detallado con contexto y objetivos
+            2. Análisis temático profundo con subtemas y conexiones
+            3. Un diagrama Mermaid complejo que muestre todas las relaciones
+            4. Conclusiones detalladas, recomendaciones y casos de estudio
+            5. 5-7 temas relacionados con explicaciones"""
+        }
 
-        1. Un resumen ejecutivo de los puntos principales
-        2. Los temas clave discutidos
-        3. Un diagrama Mermaid que muestre el flujo de los conceptos o procesos principales discutidos. Utiliza `graph TD` para la dirección. 
-           Aplica diferentes formas a los nodos (por ejemplo, rectángulos para procesos, diamantes para decisiones) y etiqueta las flechas para indicar el flujo condicional (como 'Sí'/'No').
-        4. Conclusiones y recomendaciones
-        5. Temas relacionados: Lista de 3-5 conceptos vinculados al contenido, es decir videos de youtube o articulos relacionados.
+        prompt = f"""Analiza el siguiente transcript de un video de YouTube y genera un análisis en formato Markdown.
+        {detail_instructions.get(detail_level, detail_instructions['intermedio'])}
 
-        Usa el siguiente formato de ejemplo para el diagrama Mermaid o mejorasegun la informacion:
+        Usa el siguiente formato de ejemplo para el diagrama Mermaid o mejoralo según la información:
         ```mermaid
 {mermaid_diagram_example}
         ```
@@ -136,7 +163,7 @@ class GeminiHandler:
         {transcript}
 
         Genera el análisis en español y asegúrate de que el diagrama Mermaid sea relevante y útil para entender las relaciones entre los conceptos o procesos principales.
-        """.format(mermaid_diagram_example=mermaid_diagram_example, transcript=transcript)
+        """
 
         try:
             response = self.model.generate_content(prompt)
@@ -160,7 +187,7 @@ class GeminiHandler:
                 summary = json.loads(summary_response.text)
             except json.JSONDecodeError as json_e:
                 logger.error(f"Error al decodificar el resumen JSON: {json_e}")
-                logger.error(f"Texto de respuesta que causó el error: {summary_response.text[:500]}...") # Mostrar los primeros 500 caracteres
+                logger.error(f"Texto de respuesta que causó el error: {summary_response.text[:500]}...")
                 summary = {"error": "Error al parsear el resumen JSON"}
 
             return {
@@ -375,75 +402,54 @@ IMPORTANTE:
         logger.info("Prompt creado correctamente")
         return prompt
 
-    def get_analysis(self, transcript: str) -> Optional[Dict[str, Any]]:
+    def get_analysis(self, transcript: str, detail_level: str = 'intermedio') -> Optional[Dict[str, Any]]:
         """
         Obtiene el análisis de la transcripción usando Gemini.
         
         Args:
             transcript (str): Transcripción del video
+            detail_level (str): Nivel de detalle del análisis ('basico', 'intermedio', 'avanzado')
             
         Returns:
-            Optional[Dict[str, Any]]: Análisis estructurado o None si hay error
+            Optional[Dict[str, Any]]: Análisis generado o None si hay error
         """
         try:
-            logger.info("Iniciando análisis con Gemini...")
-            
-            if not self.model:
-                logger.error("El modelo no está inicializado")
-                return None
-            
             # Dividir el transcript en chunks
-            chunks = self._split_transcript(transcript)
-            all_analyses = []
+            chunks = self._split_transcript(transcript, detail_level)
             
-            # Procesar cada chunk
-            for i, chunk in enumerate(chunks, 1):
-                logger.info(f"Procesando chunk {i}/{len(chunks)}")
-                prompt = self.create_analysis_prompt(chunk)
-                logger.info("Prompt creado correctamente")
-                
-                # Configurar parámetros de generación
-                generation_config = {
-                    "temperature": 0.7,
-                    "top_p": 0.8,
-                    "top_k": 40,
-                    "max_output_tokens": 4096,  # Aumentado para análisis más extensos
-                }
-                
-                # Intentar hasta 3 veces en caso de error
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = self.model.generate_content(
-                            prompt,
-                            generation_config=generation_config
-                        )
-                        
-                        if response.text:
-                            all_analyses.append(response.text)
-                            break
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            raise
-                        logger.warning(f"Intento {attempt + 1} fallido, reintentando...")
-                        time.sleep(2 ** attempt)  # Espera exponencial
+            # Determinar cuántos chunks procesar según el nivel de detalle
+            chunks_to_process = {
+                'basico': 1,
+                'intermedio': 2,
+                'avanzado': 3
+            }.get(detail_level, 2)  # Por defecto, procesar 2 chunks
             
-            if not all_analyses:
-                logger.error("No se pudo obtener análisis de ningún chunk")
+            # Limitar el número de chunks a procesar
+            chunks = chunks[:chunks_to_process]
+            
+            # Generar análisis para cada chunk
+            analyses = []
+            for chunk in chunks:
+                analysis = self.generate_analysis(chunk, detail_level)
+                if analysis:
+                    analyses.append(analysis["analysis"])
+            
+            if not analyses:
                 return None
             
             # Combinar los análisis
-            combined_analysis = self._combine_analyses(all_analyses)
+            combined_analysis = self._combine_analyses(analyses)
+            
+            # Formatear el análisis final
+            formatted_analysis = self._format_markdown(combined_analysis)
             
             return {
                 "raw_response": combined_analysis,
-                "formatted_markdown": self._format_markdown(combined_analysis)
+                "formatted_markdown": formatted_analysis
             }
             
         except Exception as e:
-            logger.error(f"Error al obtener análisis de Gemini: {e}")
-            logger.error(f"Tipo de error: {type(e).__name__}")
-            logger.error(f"Detalles del error: {str(e)}")
+            logger.error(f"Error al obtener el análisis: {e}")
             return None
 
     def _combine_analyses(self, analyses: List[str]) -> str:
