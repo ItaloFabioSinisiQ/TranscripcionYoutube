@@ -46,45 +46,61 @@ def get_system_metrics():
 
 def get_processing_metrics():
     try:
-        total_summaries = 0
+        # Contar archivos de resumen en ambas ubicaciones
+        current_dir_summaries = len([f for f in os.listdir('.') if f.startswith('resumen_') and f.endswith('.json')])
+        generated_files_summaries = len([f for f in os.listdir(UPLOAD_FOLDER) if f.startswith('resumen_') and f.endswith('.json')])
+        total_summaries = current_dir_summaries + generated_files_summaries
+
         total_words = 0
         total_transcription_time = 0
         total_analysis_time = 0
         words_by_date = []
         valid_files_for_avg = 0
 
-        # Procesar archivos de resumen
+        # Procesar archivos de resumen en el directorio actual
         for filename in os.listdir('.'):
             if filename.startswith('resumen_') and filename.endswith('.json'):
                 try:
                     with open(filename, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        
-                        # Contar palabras del transcript
-                        if 'transcript' in data:
-                            words = len(data['transcript'].split())
-                            total_words += words
-                            
-                            # Obtener fecha del timestamp
-                            if 'timestamp' in data:
-                                date = data['timestamp'].split('T')[0]
-                                words_by_date.append({
-                                    'date': date,
-                                    'words': words
-                                })
-                        
-                        # Procesar tiempos
-                        if 'processing_times' in data:
-                            times = data['processing_times']
-                            if isinstance(times, dict):
-                                total_transcription_time += float(times.get('transcription', 0))
-                                total_analysis_time += float(times.get('analysis', 0))
-                                valid_files_for_avg += 1
-                        
-                        total_summaries += 1 # Contar cada resumen generado
+                        process_summary_file(data)
                 except Exception as e:
                     print(f"Error procesando {filename}: {str(e)}")
                     continue
+
+        # Procesar archivos de resumen en generated_files
+        for filename in os.listdir(UPLOAD_FOLDER):
+            if filename.startswith('resumen_') and filename.endswith('.json'):
+                try:
+                    with open(os.path.join(UPLOAD_FOLDER, filename), 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        process_summary_file(data)
+                except Exception as e:
+                    print(f"Error procesando {filename}: {str(e)}")
+                    continue
+
+        def process_summary_file(data):
+            nonlocal total_words, total_transcription_time, total_analysis_time, valid_files_for_avg
+            # Contar palabras del transcript
+            if 'transcript' in data:
+                words = len(data['transcript'].split())
+                total_words += words
+                
+                # Obtener fecha del timestamp
+                if 'timestamp' in data:
+                    date = data['timestamp'].split('T')[0]
+                    words_by_date.append({
+                        'date': date,
+                        'words': words
+                    })
+            
+            # Procesar tiempos
+            if 'processing_times' in data:
+                times = data['processing_times']
+                if isinstance(times, dict):
+                    total_transcription_time += float(times.get('transcription', 0))
+                    total_analysis_time += float(times.get('analysis', 0))
+                    valid_files_for_avg += 1
 
         # Calcular promedios
         avg_transcription = total_transcription_time / valid_files_for_avg if valid_files_for_avg > 0 else 0
@@ -118,6 +134,40 @@ def get_processing_metrics():
             'words_by_date': []
         }
 
+def update_url_history(video_url, video_id):
+    """Actualiza el historial de URLs procesadas"""
+    try:
+        history_file = 'url_history.json'
+        if os.path.exists(history_file):
+            with open(history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        else:
+            history = {
+                "urls": [],
+                "total_processed": 0,
+                "last_updated": ""
+            }
+        
+        # Verificar si la URL ya existe
+        url_exists = any(url['video_id'] == video_id for url in history['urls'])
+        
+        if not url_exists:
+            history['urls'].append({
+                'url': video_url,
+                'video_id': video_id,
+                'timestamp': datetime.now().isoformat()
+            })
+            history['total_processed'] = len(history['urls'])
+            history['last_updated'] = datetime.now().isoformat()
+            
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=4, ensure_ascii=False)
+        
+        return history['total_processed']
+    except Exception as e:
+        print(f"Error actualizando historial de URLs: {e}")
+        return 0
+
 @app.route('/')
 def index():
     try:
@@ -144,20 +194,24 @@ def analizar():
         if not video_url:
             return jsonify({'error': 'Por favor, proporciona una URL de YouTube'}), 400
 
+        # Extraer ID del video
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            return jsonify({'error': 'URL de YouTube inválida'}), 400
+
+        # Actualizar historial de URLs
+        total_processed = update_url_history(video_url, video_id)
+
         # Generar ID único para el análisis
-        analysis_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{extract_video_id(video_url)}"
+        analysis_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{video_id}"
         
         # Inicializar estado del análisis
         analysis_status[analysis_id] = {
             'status': 'iniciando',
             'progress': 0,
-            'message': 'Iniciando análisis...'
+            'message': 'Iniciando análisis...',
+            'total_processed': total_processed
         }
-
-        # Extraer ID del video
-        video_id = extract_video_id(video_url)
-        if not video_id:
-            return jsonify({'error': 'URL de YouTube inválida'}), 400
 
         # Actualizar estado
         analysis_status[analysis_id]['status'] = 'transcribiendo'
