@@ -6,6 +6,8 @@ import io
 import base64
 from datetime import datetime
 import json
+import time
+import psutil
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'tu_clave_secreta_aqui'
@@ -22,9 +24,116 @@ transcriber = YouTubeTranscriber("AIzaSyAsjXWIqf5ecv4ZDjnAWSjr-zn_1nMMm4k")
 analysis_status = {}
 analysis_results = {}
 
+def get_system_metrics():
+    """Obtiene métricas del sistema"""
+    try:
+        cpu_percent = psutil.cpu_percent()
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        return {
+            'cpu_usage': f"{cpu_percent}%",
+            'memory_usage': f"{memory.percent}%",
+            'storage_usage': f"{disk.percent}%"
+        }
+    except Exception as e:
+        print(f"Error obteniendo métricas del sistema: {e}")
+        return {
+            'cpu_usage': '0%',
+            'memory_usage': '0%',
+            'storage_usage': '0%'
+        }
+
+def get_processing_metrics():
+    try:
+        total_summaries = 0
+        total_words = 0
+        total_transcription_time = 0
+        total_analysis_time = 0
+        words_by_date = []
+        valid_files_for_avg = 0
+
+        # Procesar archivos de resumen
+        for filename in os.listdir('.'):
+            if filename.startswith('resumen_') and filename.endswith('.json'):
+                try:
+                    with open(filename, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        
+                        # Contar palabras del transcript
+                        if 'transcript' in data:
+                            words = len(data['transcript'].split())
+                            total_words += words
+                            
+                            # Obtener fecha del timestamp
+                            if 'timestamp' in data:
+                                date = data['timestamp'].split('T')[0]
+                                words_by_date.append({
+                                    'date': date,
+                                    'words': words
+                                })
+                        
+                        # Procesar tiempos
+                        if 'processing_times' in data:
+                            times = data['processing_times']
+                            if isinstance(times, dict):
+                                total_transcription_time += float(times.get('transcription', 0))
+                                total_analysis_time += float(times.get('analysis', 0))
+                                valid_files_for_avg += 1
+                        
+                        total_summaries += 1 # Contar cada resumen generado
+                except Exception as e:
+                    print(f"Error procesando {filename}: {str(e)}")
+                    continue
+
+        # Calcular promedios
+        avg_transcription = total_transcription_time / valid_files_for_avg if valid_files_for_avg > 0 else 0
+        avg_analysis = total_analysis_time / valid_files_for_avg if valid_files_for_avg > 0 else 0
+
+        avg_total_processing_time = avg_transcription + avg_analysis
+
+        # Calcular porcentajes
+        percent_transcription = round((avg_transcription / avg_total_processing_time) * 100, 2) if avg_total_processing_time > 0 else 0
+        percent_analysis = round((avg_analysis / avg_total_processing_time) * 100, 2) if avg_total_processing_time > 0 else 0
+
+        # Ordenar datos por fecha
+        words_by_date.sort(key=lambda x: x['date'])
+
+        return {
+            'total_summaries': total_summaries,
+            'total_words': total_words,
+            'avg_time': round(avg_total_processing_time, 2),
+            'avg_transcription_percent': percent_transcription,
+            'avg_analysis_percent': percent_analysis,
+            'words_by_date': words_by_date
+        }
+    except Exception as e:
+        print(f"Error en get_processing_metrics: {str(e)}")
+        return {
+            'total_summaries': 0,
+            'total_words': 0,
+            'avg_time': 0,
+            'avg_transcription_percent': 0,
+            'avg_analysis_percent': 0,
+            'words_by_date': []
+        }
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        metrics = get_processing_metrics()
+        print("Métricas generadas:", metrics)
+        return render_template('index.html', metrics=metrics)
+    except Exception as e:
+        print(f"Error en index: {str(e)}")
+        return render_template('index.html', metrics={
+            'total_summaries': 0,
+            'total_words': 0,
+            'avg_time': 0,
+            'avg_transcription_percent': 0,
+            'avg_analysis_percent': 0,
+            'words_by_date': []
+        })
 
 @app.route('/analizar', methods=['POST'])
 def analizar():
@@ -56,7 +165,11 @@ def analizar():
         analysis_status[analysis_id]['message'] = 'Obteniendo transcripción...'
 
         # Obtener transcripción
+        start_transcription_time = time.time()
         transcript = transcriber.get_transcript(video_id)
+        end_transcription_time = time.time()
+        transcription_duration = end_transcription_time - start_transcription_time
+
         if not transcript:
             return jsonify({'error': 'No se pudo obtener la transcripción del video'}), 400
 
@@ -66,7 +179,11 @@ def analizar():
         analysis_status[analysis_id]['message'] = 'Generando análisis...'
 
         # Obtener análisis
+        start_analysis_time = time.time()
         analysis = transcriber.gemini_handler.get_analysis(transcript, detail_level=detail_level)
+        end_analysis_time = time.time()
+        analysis_duration = end_analysis_time - start_analysis_time
+
         if not analysis:
             return jsonify({'error': 'No se pudo generar el análisis'}), 400
 
@@ -82,7 +199,12 @@ def analizar():
             "transcript": transcript,
             "analysis": analysis["raw_response"],
             "detail_level": detail_level,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "processing_times": {
+                "transcription": transcription_duration,
+                "analysis": analysis_duration,
+                "summary": 0 # No se mide un tiempo de resumen por separado en este flujo
+            }
         }
         transcriber.save_summary(summary, video_id)
 
